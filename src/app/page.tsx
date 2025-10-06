@@ -1,141 +1,121 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
 
-// 填入你的 Roboflow 信息
-const RF_URL = "https://detect.roboflow.com/fitness-activity-all-woacc/1";
-const RF_KEY = "rf_dOAlBX3ugOMZF0RuFp1FyyuMl8C3";
+import { useState, useRef } from 'react';
+import { detectImage } from '@/utils/detector';
 
-// 动作代谢当量（计算热量用）
-const ACTION_MET: Record<string, number> = {
-  pushup: 8.0,
-  seated_row: 4.5,
-  seated_shoulder_press: 5.0,
-  squat: 5.5,
-};
+const KCAL_PER_REP = 0.4;
 
 export default function Home() {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const [res, setRes] = useState({ reps: 0, kcal: 0, action: '' });
-  const [user, setUser] = useState({ weight: 70, height: 170 });
-  const [showForm, setShowForm] = useState(true);
+  const [imgUrl, setImgUrl] = useState<string | null>(null);
+  const [count, setCount] = useState(0);
+  const [kcal, setKcal] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
-    if (showForm) return;
-    (async () => {
-      // 获取摄像头权限
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: 'user' } 
-      });
-      videoRef.current!.srcObject = stream;
-      
-      // 创建画布用于截取视频帧
-      const canvas = document.createElement('canvas');
+  const handleFile = async (file: File) => {
+    setLoading(true);
+    const url = URL.createObjectURL(file);
+    setImgUrl(url);
+
+    const img = new Image();
+    img.src = url;
+    img.onload = async () => {
+      const canvas = canvasRef.current!;
       const ctx = canvas.getContext('2d')!;
-      
-      // 循环处理视频帧
-      const loop = async () => {
-        canvas.width = videoRef.current!.videoWidth;
-        canvas.height = videoRef.current!.videoHeight;
-        ctx.drawImage(videoRef.current!, 0, 0);
-        
-        // 转为图片 blob 并发送到 Roboflow API
-        canvas.toBlob(async (blob) => {
-          if (!blob) return;
-          const fd = new FormData();
-          fd.append('file', blob);
-          
-          const response = await fetch(
-            `${RF_URL}?api_key=${RF_KEY}&format=json`, 
-            { method: 'POST', body: fd }
-          );
-          
-          const data = await response.json();
-          // 处理识别结果（只关注完成的动作）
-          const completeActions = data.predictions?.filter(
-            (p: any) => p.class.includes('complete')
-          );
-          
-          if (completeActions?.length) {
-            const [action] = completeActions[0].class.split('_');
-            const minutes = 1 / 60; // 估算每帧时间
-            const kcal = Math.round(ACTION_MET[action] * user.weight * minutes);
-            setRes(prev => ({ 
-              reps: prev.reps + 1, 
-              kcal: prev.kcal + kcal, 
-              action 
-            }));
-          }
-        }, 'image/jpeg');
-        
-        requestAnimationFrame(loop);
+      canvas.width = img.width;
+      canvas.height = img.height;
+      ctx.drawImage(img, 0, 0);
+
+      const preds = await detectImage(img);
+      const hasPushUp = preds.some((p: any) => p.class === 'push-up');
+      if (hasPushUp) {
+        const newCount = count + 1;
+        setCount(newCount);
+        setKcal(Number((newCount * KCAL_PER_REP).toFixed(1)));
+      }
+
+      preds.forEach((pred: any) => {
+        const { x, y, width, height, class: label, confidence } = pred.bbox;
+        ctx.strokeStyle = '#00FF00';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x - width / 2, y - height / 2, width, height);
+        ctx.fillStyle = '#00FF00';
+        ctx.font = '16px Arial';
+        ctx.fillText(`${label} ${(confidence * 100).toFixed(0)}%`, x - width / 2, y - height / 2 - 5);
+      });
+      setLoading(false);
+    };
+  };
+
+  const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) handleFile(file);
+  };
+
+  const openCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      const video = document.createElement('video');
+      video.srcObject = stream;
+      video.play();
+      video.onloadedmetadata = () => {
+        const canvas = canvasRef.current!;
+        const ctx = canvas.getContext('2d')!;
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const capture = () => {
+          ctx.drawImage(video, 0, 0);
+          canvas.toBlob((blob) => {
+            if (blob) handleFile(new File([blob], 'camera.jpg', { type: 'image/jpeg' }));
+            stream.getTracks().forEach(t => t.stop());
+          }, 'image/jpeg');
+        };
+        setTimeout(capture, 500);
       };
-      loop();
-    })();
-  }, [showForm, user.weight]);
+    } catch (e) {
+      alert('摄像头打开失败，请允许权限');
+    }
+  };
+
+  const reset = () => {
+    setImgUrl(null);
+    setCount(0);
+    setKcal(0);
+    fileInputRef.current && (fileInputRef.current.value = '');
+  };
 
   return (
-    <main className="flex flex-col items-center p-6 max-w-3xl mx-auto">
-      <h1 className="text-2xl font-bold mb-4">AI 健身热量计数器</h1>
-      <video 
-        ref={videoRef} 
-        autoPlay 
-        playsInline 
-        muted 
-        className="rounded w-full border-2 border-gray-200"
-      />
-      
-      <div className="mt-4 grid grid-cols-3 gap-4 w-full text-center">
-        <div className="bg-gray-100 p-3 rounded">
-          <div className="text-sm text-gray-500">当前动作</div>
-          <div className="font-medium">{res.action || '---'}</div>
-        </div>
-        <div className="bg-gray-100 p-3 rounded">
-          <div className="text-sm text-gray-500">完成次数</div>
-          <div className="font-medium">{res.reps}</div>
-        </div>
-        <div className="bg-orange-50 p-3 rounded">
-          <div className="text-sm text-orange-600">消耗热量</div>
-          <div className="font-medium text-orange-600">{res.kcal} kcal</div>
-        </div>
-      </div>
+    <div className="min-h-screen bg-gradient-to-br from-purple-500 via-pink-500 to-red-500 flex items-center justify-center p-6">
+      <div className="w-full max-w-2xl bg-white/20 backdrop-blur-lg rounded-3xl shadow-2xl p-8 text-white">
+        <h1 className="text-3xl font-extrabold text-center mb-6">AI 健身计数器</h1>
 
-      {showForm && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4">
-          <div className="bg-white rounded-lg p-6 w-full max-w-sm">
-            <h2 className="text-xl font-semibold mb-4">个人信息</h2>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm mb-1">体重 (kg)</label>
-                <input
-                  type="number"
-                  min="30"
-                  max="200"
-                  defaultValue={user.weight}
-                  onChange={(e) => setUser({ ...user, weight: Number(e.target.value) })}
-                  className="w-full border border-gray-300 rounded px-3 py-2"
-                />
-              </div>
-              <div>
-                <label className="block text-sm mb-1">身高 (cm)</label>
-                <input
-                  type="number"
-                  min="100"
-                  max="250"
-                  defaultValue={user.height}
-                  onChange={(e) => setUser({ ...user, height: Number(e.target.value) })}
-                  className="w-full border border-gray-300 rounded px-3 py-2"
-                />
-              </div>
-              <button
-                onClick={() => setShowForm(false)}
-                className="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700"
-              >
-                开始训练
-              </button>
+        {!imgUrl && (
+          <div className="flex flex-col items-center gap-4">
+            <button onClick={openCamera} className="px-6 py-3 bg-blue-500 hover:bg-blue-600 rounded-full font-semibold transition">📷 打开摄像头</button>
+            <label className="px-6 py-3 bg-green-500 hover:bg-green-600 rounded-full font-semibold cursor-pointer transition">
+              📁 上传图片
+              <input ref={fileInputRef} type="file" accept="image/*" onChange={handleUpload} className="hidden" />
+            </label>
+          </div>
+        )}
+
+        {imgUrl && (
+          <div className="space-y-4">
+            {loading && <p className="text-center">识别中...</p>}
+            <canvas ref={canvasRef} className="mx-auto rounded-xl shadow" />
+            <div className="bg-white/10 rounded-2xl p-4 text-center">
+              <div className="text-lg">当前动作：俯卧撑</div>
+              <div className="text-2xl font-bold">完成次数：{count}</div>
+              <div className="text-xl">消耗热量：{kcal} kcal</div>
+            </div>
+            <div className="flex gap-4 justify-center">
+              <button onClick={reset} className="px-5 py-2 bg-gray-600 hover:bg-gray-700 rounded-full transition">再来一张</button>
+              <a href={imgUrl} download="result.jpg" className="px-5 py-2 bg-yellow-500 hover:bg-yellow-600 rounded-full transition">下载结果</a>
             </div>
           </div>
-        </div>
-      )}
-    </main>
+        )}
+      </div>
+    </div>
   );
 }
